@@ -1,0 +1,16 @@
+[submodule "hypre"]
+	path = hypre
+	url = https://github.com/hypre-space/hypre.git
+
+[submodule "mfem"]
+	path = mfem
+	url = https://github.com/IdoAkkerman/mfem.git
+	branch = origin/rbvms-9-2024
+[submodule "submodule.mfem.path"]
+	path = mfem
+	url = https://github.com/IdoAkkerman/mfem.git
+	branch = rbvms-9-2024
+[submodule "submodule.hypre.path"]
+	path = hypre
+	url = https://github.com/hypre-space/hypre.git
+	branch = master
