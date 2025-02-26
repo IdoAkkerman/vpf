@@ -5,7 +5,7 @@
 # CONTRIBUTING.md for details.
 #-------------------------------------------------------------------------------
 cmake_minimum_required(VERSION 3.8)
-project(RBVMS LANGUAGES CXX C)
+project(VPF LANGUAGES CXX C)
 
 #-------------------------------------------------------------------------------
 # Check MFEM_DIR
@@ -35,7 +35,7 @@ get_filename_component(tmp1 ${MFEM_DIR} REALPATH)
 get_filename_component(tmp2 ${PROJECT_BINARY_DIR}/.. REALPATH)
 
 if (${tmp1} STREQUAL ${tmp2})
-  message(STATUS "Report RBVMS, MFEM and hypre in build info.")
+  message(STATUS "Report VPF, MFEM and hypre in build info.")
   add_custom_command(OUTPUT buildInfo.hpp
                      PRE_BUILD
                      COMMAND /bin/bash
@@ -44,7 +44,7 @@ if (${tmp1} STREQUAL ${tmp2})
                      COMMENT "Getting git info")
 else()
   message(STATUS "External MFEM and hypre libraries used.")
-  message(STATUS "Only report RBVMS in build info.")
+  message(STATUS "Only report VPF in build info.")
   add_custom_command(OUTPUT buildInfo.hpp
                      PRE_BUILD
                      COMMAND /bin/bash
@@ -85,5 +85,5 @@ include_directories(${MFEM_INCLUDE_DIRS})
 add_executable(vpf vpf.cpp ${SOURCES} ${HEADERS})
 
 target_link_libraries(vpf PRIVATE ${MFEM_LIBRARIES})
-install(TARGETS rbvms DESTINATION bin)
+install(TARGETS vpf DESTINATION bin)
 
