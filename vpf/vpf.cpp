@@ -249,6 +249,7 @@ int main(int argc, char *argv[])
       if (slave_bdr.Size()>0) {cout<<"Periodic (slave)  = "; slave_bdr.Print();}
    }
 
+
    Array<bool> bnd_flag(pmesh.bdr_attributes.Max()+1);
    bnd_flag = true;
    for (int b = 0; b < pmesh.bdr_attributes.Size(); b++)
@@ -308,43 +309,100 @@ int main(int argc, char *argv[])
       }
    }
 
+   Array<int> boundary_dofs;
+   space.GetBoundaryTrueDofs(boundary_dofs);
+   boundary_dofs.Print();
+
    // 5. Define the time stepping algorithm
    // Get vector offsets
    Array<int> bOffsets(3);
    bOffsets[0] = 0;
-   bOffsets[1] = space.TrueVSize();
-   bOffsets[2] = space.TrueVSize();
+   bOffsets[1] = space.GetVSize();
+   bOffsets[2] = space.GetVSize();
    bOffsets.PartialSum();
 
-   // Set up the preconditioner
-   JacobianPreconditioner jac_prec(bOffsets);
-   Solver* pc_mom = nullptr;
-   Solver* pc_cont= nullptr;
+   Array<int> btOffsets(3);
+   btOffsets[0] = 0;
+   btOffsets[1] = space.TrueVSize();
+   btOffsets[2] = space.TrueVSize();
+   btOffsets.PartialSum();
 
-   HypreSmoother* hs_mom = new HypreSmoother();
-   HypreILU* ilu_cont = new HypreILU();
+ //  MemoryType mt = device.GetMemoryType();
+ //  BlockVector x(bOffsets, mt), rhs(bOffsets, mt);
+ //  BlockVector trueX(btOffsets, mt), trueRhs(btOffsets, mt);
 
-   pc_mom = hs_mom;
-   pc_cont = ilu_cont;
+   BlockVector x(bOffsets), rhs(bOffsets);
+   BlockVector trueX(btOffsets), trueRhs(btOffsets);
 
-   jac_prec.SetPreconditioner(0, pc_mom);
-   jac_prec.SetPreconditioner(1, pc_cont);
+   // Linear form
+   ConstantCoefficient one(1.0);
+   ParLinearForm *lform_re(new ParLinearForm);
+   lform_re->Update(&space, rhs.GetBlock(0), 0);
+   lform_re->AddDomainIntegrator(new DomainLFIntegrator(one));
+   lform_re->Assemble();
+   lform_re->SyncAliasMemory(rhs);
+   lform_re->ParallelAssemble(trueRhs.GetBlock(0));
+   trueRhs.GetBlock(0).SyncAliasMemory(trueRhs);
 
-   // Set up the Jacobian solver
+   ConstantCoefficient two(2.0);
+   ParLinearForm *lform_im(new ParLinearForm);
+   lform_im->Update(&space, rhs.GetBlock(1), 0);
+   lform_im->AddDomainIntegrator(new DomainLFIntegrator(two));
+   lform_im->Assemble();
+   lform_im->SyncAliasMemory(rhs);
+   lform_im->ParallelAssemble(trueRhs.GetBlock(1));
+   trueRhs.GetBlock(1).SyncAliasMemory(trueRhs);
 
-   FGMRESSolver j_gmres(MPI_COMM_WORLD);
-   j_gmres.iterative_mode = false;
-   j_gmres.SetRelTol(GMRES_RelTol);
-   j_gmres.SetAbsTol(1e-12);
-   j_gmres.SetMaxIter(GMRES_MaxIter);
-   j_gmres.SetPrintLevel(1);
-   j_gmres.SetPreconditioner(jac_prec);
+   // Bilinear form
+   ParBilinearForm poisson(&space);
 
-   // 6. Define the solution vector, grid function and output
+   poisson.AddDomainIntegrator(new DiffusionIntegrator);
+   poisson.Assemble();
+   poisson.EliminateVDofs(boundary_dofs);//, *x0, *F);
+   poisson.Finalize();
+   HypreParMatrix *A = poisson.ParallelAssemble();
+
+   //if (pa) { bVarf->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
+  // bVarf->AddDomainIntegrator(new VectorFEDivergenceIntegrator);
+  // bVarf->Assemble();
+  // if (!pa) { bVarf->Finalize(); }
+
+   BlockOperator jac(bOffsets);
+   jac.SetBlock(0, 0, A);
+   jac.SetBlock(1, 1, A);
+
+
+
+
+
+   HypreBoomerAMG M(*A);
+
+   BlockDiagonalPreconditioner precon(bOffsets);
+   precon.SetDiagonalBlock(0, &M);
+   precon.SetDiagonalBlock(1, &M);
+
+
+
+   CGSolver cg2(MPI_COMM_WORLD);
+   cg2.SetRelTol(1e-12);
+   cg2.SetMaxIter(2000);
+   cg2.SetPrintLevel(1);
+   cg2.SetPreconditioner(precon);
+   cg2.SetOperator(jac);
+   cg2.Mult(trueRhs,trueX);
+
+
+
+
+
 
    // Define the gridfunctions
    ParGridFunction phi_re_gf(&space);
    ParGridFunction phi_im_gf(&space);
+
+   phi_re_gf.Distribute(trueX.GetBlock(0));
+   phi_im_gf.Distribute(trueX.GetBlock(1));
+
 
    // Define the visualisation output
    VisItDataCollection vdc("step", &pmesh);
@@ -356,76 +414,10 @@ int main(int argc, char *argv[])
    // vdc.SetTime(t);
    vdc.Save();
 
-   // Get the start vector(s) from file -- or from function
-   // 7. Actual time integration
 
-
-   // 8. Set up the linear form b(.) corresponding to the right-hand side.
-   ConstantCoefficient one(1.0);
-   ParLinearForm b(&space);
-   b.AddDomainIntegrator(new DomainLFIntegrator(one));
-   b.Assemble();
-
-   // 9. Set up the bilinear form a(.,.) corresponding to the -Delta operator.
-   ParBilinearForm a(&space);
-   a.AddDomainIntegrator(new DiffusionIntegrator);
-   a.Assemble();
-
-
-   Array<int> boundary_dofs;
-   space.GetBoundaryTrueDofs(boundary_dofs);
-
-   boundary_dofs.Print();
-   // 10. Form the linear system A X = B. This includes eliminating boundary
-   //     conditions, applying AMR constraints, parallel assembly, etc.
-   HypreParMatrix A;
-   Vector B, X;
-   a.FormLinearSystem(boundary_dofs, phi_re_gf, b, A, X, B);
-
-   // 11. Solve the system using PCG with hypre's BoomerAMG preconditioner.
-   HypreBoomerAMG M(A);
-   CGSolver cg(MPI_COMM_WORLD);
-   cg.SetRelTol(1e-12);
-   cg.SetMaxIter(2000);
-   cg.SetPrintLevel(1);
-   cg.SetPreconditioner(M);
-   cg.SetOperator(A);
-   cg.Mult(B, X);
-
-   // 12. Recover the solution x as a grid function and save to file. The output
-   //     can be viewed using GLVis as follows: "glvis -np <np> -m mesh -g sol"
-   a.RecoverFEMSolution(X, b, phi_re_gf);
-
-
-
- //  ParLinearForm b(&space);
-   b.AddDomainIntegrator(new DomainLFIntegrator(one));
-   b.Assemble();
-
-   a.FormLinearSystem(boundary_dofs, phi_im_gf, b, A, X, B);
-
-   // 11. Solve the system using PCG with hypre's BoomerAMG preconditioner.
-  // HypreBoomerAMG M(A);
-  // CGSolver cg(MPI_COMM_WORLD);
-  // cg.SetRelTol(1e-12);
-  // cg.SetMaxIter(2000);
-  // cg.SetPrintLevel(1);
-   cg.SetPreconditioner(M);
-   cg.SetOperator(A);
-   cg.Mult(B, X);
-
-   a.RecoverFEMSolution(X, b, phi_im_gf);
-
-
-         // Actually write to file
-         vdc.SetCycle(1);
-        // vdc.SetTime(t);
-         vdc.Save();
-
-
-
-
-
+   vdc.SetCycle(1);
+   // vdc.SetTime(t);
+   vdc.Save();
 
 
 
