@@ -41,7 +41,7 @@ void CheckBoundaries(Array<bool> &bnd_flags,
    for (int b = 0; b < bc_bnds.Size(); b++)
    {
       int bnd = bc_bnds[b];
-cout<<"b = "<<b<<" : "<<bnd<<endl;
+      cout<<"b = "<<b<<" : "<<bnd<<endl;
       if ( bnd < 0 || bnd > amax )
       {
          mfem_error("Boundary out of range.");
@@ -96,7 +96,7 @@ public:
    {
       for (int i = 0; i < prec.Size(); ++i)
       {
-         if (prec[i]) delete prec[i];
+         if (prec[i]) { delete prec[i]; }
       }
    }
 
@@ -159,11 +159,11 @@ int main(int argc, char *argv[])
                   " - Diffusion\n\t");
 
    // Time stepping params
-//   Array<int> master_bdr;
-//   Array<int> slave_bdr;
+   //   Array<int> master_bdr;
+   //   Array<int> slave_bdr;
 
-  // int ode_solver_type = 35;
-  //int ode_solver_type = 35;
+   // int ode_solver_type = 35;
+   //int ode_solver_type = 35;
    real_t t_final = 10.0;
    real_t dt = 0.01;
    real_t dt_max = 1.0;
@@ -172,8 +172,8 @@ int main(int argc, char *argv[])
    real_t cfl_target = 2.0;
    real_t dt_gain = -1.0;
 
- //  args.AddOption(&ode_solver_type, "-s", "--ode-solver",
- //                 ODESolver::ImplicitTypes.c_str());
+   //  args.AddOption(&ode_solver_type, "-s", "--ode-solver",
+   //                 ODESolver::ImplicitTypes.c_str());
    args.AddOption(&t_final, "-tf", "--t-final",
                   "Final time; start time is 0.");
    args.AddOption(&dt, "-dt", "--dt",
@@ -211,6 +211,10 @@ int main(int argc, char *argv[])
    args.AddOption(&vis_dir, "-vd", "--vis-dir",
                   "Directory for visualization files.\n\t");
 
+   real_t omega = 0.5;
+   real_t gravity = 9.81;
+   real_t cel = 112.0;
+
 
    // Parse parameters
    args.Parse();
@@ -246,11 +250,11 @@ int main(int argc, char *argv[])
    // Boundary conditions
    if (Mpi::Root())
    {
-  /*    if (strong_bdr.Size()>0) {cout<<"Strong  = "; strong_bdr.Print();}
-      if (weak_bdr.Size()>0) {cout<<"Weak    = "; weak_bdr.Print();}
-      if (outflow_bdr.Size()>0){ cout<<"Outflow = "; outflow_bdr.Print() ;}
-      if (suction_bdr.Size()>0){ cout<<"Suction = "; suction_bdr.Print() ;}
-      if (blowing_bdr.Size()>0){ cout<<"Blowing = "; blowing_bdr.Print() ;}*/
+      /*    if (strong_bdr.Size()>0) {cout<<"Strong  = "; strong_bdr.Print();}
+          if (weak_bdr.Size()>0) {cout<<"Weak    = "; weak_bdr.Print();}
+          if (outflow_bdr.Size()>0){ cout<<"Outflow = "; outflow_bdr.Print() ;}
+          if (suction_bdr.Size()>0){ cout<<"Suction = "; suction_bdr.Print() ;}
+          if (blowing_bdr.Size()>0){ cout<<"Blowing = "; blowing_bdr.Print() ;}*/
       if (master_bdr.Size()>0) {cout<<"Periodic (master) = "; master_bdr.Print();}
       if (slave_bdr.Size()>0) {cout<<"Periodic (slave)  = "; slave_bdr.Print();}
    }
@@ -263,7 +267,7 @@ int main(int argc, char *argv[])
       bnd_flag[pmesh.bdr_attributes[b]] = false;
    }
 
-pmesh.bdr_attributes.Print();
+   pmesh.bdr_attributes.Print();
 
    CheckBoundaries(bnd_flag, freesurf_bdr);
    CheckBoundaries(bnd_flag, bottom_bdr);
@@ -278,15 +282,15 @@ pmesh.bdr_attributes.Print();
    for (int b = 0; b < bnd_flag.Size(); b++)
    {
       MFEM_VERIFY(bnd_flag[b],
-                 "Not all boundaries have a boundary condition set.");
+                  "Not all boundaries have a boundary condition set.");
    }
 
    // 4. Define a finite element space on the mesh.
    FiniteElementCollection* fec = FECollection::NewH1(order, dim, pmesh.IsNURBS());
 
    ParFiniteElementSpace space(&pmesh, fec, 1,  Ordering::byNODES);
-                                         //, Ordering::byVDIM);
-                                        // ,master_bdr, slave_bdr);
+   //, Ordering::byVDIM);
+   // ,master_bdr, slave_bdr);
 
    // Report the degree of freedoms used
    {
@@ -380,66 +384,73 @@ pmesh.bdr_attributes.Print();
 
    // Bilinear form
    ParBilinearForm poisson(&space);
-
    poisson.AddDomainIntegrator(new DiffusionIntegrator);
    poisson.Assemble();
-   //poisson.EliminateVDofs(boundary_dofs);//, *x0, *F);
+   //   poisson.EliminateVDofs(boundary_dofs);//, *x0, *F);
    poisson.Finalize();
 
+
+   ConstantCoefficient zero(1e-100);
    ParBilinearForm fs_form(&space);
+   fs_form.AddDomainIntegrator(new MassIntegrator(zero));
    fs_form.AddBdrFaceIntegrator(new BoundaryMassIntegrator(one),freesurf_bdr);
    fs_form.Assemble();
-   //fs_form.EliminateVDofs(boundary_dofs);//, *x0, *F);
+   //   fs_form.EliminateVDofs(boundary_dofs);//, *x0, *F);
    fs_form.Finalize();
 
    ParBilinearForm out_form(&space);
+   out_form.AddDomainIntegrator(new MassIntegrator(zero));
    out_form.AddBdrFaceIntegrator(new BoundaryMassIntegrator(one),outflow_bdr);
    out_form.Assemble();
-   //out_form.EliminateVDofs(boundary_dofs);//, *x0, *F);
+   //  out_form.EliminateVDofs(boundary_dofs);//, *x0, *F);
    out_form.Finalize();
 
    HypreParMatrix *A    = poisson.ParallelAssemble();
    HypreParMatrix *Afs  = fs_form.ParallelAssemble();
    HypreParMatrix *Aout = out_form.ParallelAssemble();
+   //Afs->Print("Afs");
 
-   A->Add(3.0, *Afs);
-   A->Add(4.0, *Aout);
+   for (int l = 0; l < 15; l++)
+   {
 
-   BlockOperator jac(bOffsets);
-   jac.SetBlock(0, 0, A);
-   jac.SetBlock(1, 1, A);
-
+      omega *=1.1;
 
 
-   // Preconditioner
-   HypreBoomerAMG M(*A);
-   BlockDiagonalPreconditioner precon(bOffsets);
-   precon.SetDiagonalBlock(0, &M);
-   precon.SetDiagonalBlock(1, &M);
+      HypreParMatrix Ad(*A);
+      Ad.Add(-omega*omega/gravity, *Afs);
 
-   // Solver
-   CGSolver cg(MPI_COMM_WORLD);
-   cg.SetRelTol(1e-12);
-   cg.SetMaxIter(2000);
-   cg.SetPrintLevel(1);
-   cg.SetPreconditioner(precon);
-   cg.SetOperator(jac);
-   cg.Mult(trueRhs,trueX);
+      BlockOperator jac(bOffsets);
+      jac.SetBlock(0, 0, &Ad);
+      jac.SetBlock(0, 1, Aout, omega/cel);
 
-   // Visualize solution
-   phi_re.Distribute(trueX.GetBlock(0));
-   phi_im.Distribute(trueX.GetBlock(1));
-   vdc.SetCycle(0);
-   vdc.Save();
+      jac.SetBlock(1, 0, Aout, -omega/cel);
+      jac.SetBlock(1, 1, &Ad);
 
-   pdc.SetCycle(0);
-   pdc.Save();
+      // Preconditioner
+      //   HypreBoomerAMG M(Ad);
+      HypreSmoother M(Ad);
+      BlockDiagonalPreconditioner precon(bOffsets);
+      precon.SetDiagonalBlock(0, &M);
+      precon.SetDiagonalBlock(1, &M);
 
-   vdc.SetCycle(1);
-   vdc.Save();
+      // Solver
+      CGSolver cg(MPI_COMM_WORLD);
+      cg.SetRelTol(1e-12);
+      cg.SetMaxIter(2000);
+      cg.SetPrintLevel(1);
+      cg.SetPreconditioner(precon);
+      cg.SetOperator(jac);
+      cg.Mult(trueRhs,trueX);
 
-   pdc.SetCycle(1);
-   pdc.Save();
+      // Visualize solution
+      phi_re.Distribute(trueX.GetBlock(0));
+      phi_im.Distribute(trueX.GetBlock(1));
+      vdc.SetCycle(l);
+      vdc.Save();
+
+      pdc.SetCycle(l);
+      pdc.Save();
+   }
 
    // 8. Free the used memory.
    delete fec;
