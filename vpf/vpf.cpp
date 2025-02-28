@@ -313,7 +313,6 @@ int main(int argc, char *argv[])
    space.GetBoundaryTrueDofs(boundary_dofs);
    boundary_dofs.Print();
 
-   // 5. Define the time stepping algorithm
    // Get vector offsets
    Array<int> bOffsets(3);
    bOffsets[0] = 0;
@@ -327,12 +326,27 @@ int main(int argc, char *argv[])
    btOffsets[2] = space.TrueVSize();
    btOffsets.PartialSum();
 
- //  MemoryType mt = device.GetMemoryType();
- //  BlockVector x(bOffsets, mt), rhs(bOffsets, mt);
- //  BlockVector trueX(btOffsets, mt), trueRhs(btOffsets, mt);
-
+   // Define the vectors
    BlockVector x(bOffsets), rhs(bOffsets);
    BlockVector trueX(btOffsets), trueRhs(btOffsets);
+
+   // Define the gridfunctions
+   ParGridFunction phi_re(&space);
+   ParGridFunction phi_im(&space);
+
+   // Define the visit visualisation output
+   VisItDataCollection vdc("step", &pmesh);
+   vdc.SetPrefixPath(vis_dir);
+   vdc.RegisterField("phi_re", &phi_re);
+   vdc.RegisterField("phi_im", &phi_im);
+
+   // Define the paraview visualisation output
+   ParaViewDataCollection pdc(vis_dir, &pmesh);
+   pdc.SetLevelsOfDetail(order);
+   pdc.SetDataFormat(VTKFormat::BINARY);
+   pdc.SetHighOrderOutput(true);
+   pdc.RegisterField("phi_re", &phi_re);
+   pdc.RegisterField("phi_im", &phi_im);
 
    // Linear form
    ConstantCoefficient one(1.0);
@@ -362,65 +376,39 @@ int main(int argc, char *argv[])
    poisson.Finalize();
    HypreParMatrix *A = poisson.ParallelAssemble();
 
-   //if (pa) { bVarf->SetAssemblyLevel(AssemblyLevel::PARTIAL); }
-  // bVarf->AddDomainIntegrator(new VectorFEDivergenceIntegrator);
-  // bVarf->Assemble();
-  // if (!pa) { bVarf->Finalize(); }
-
    BlockOperator jac(bOffsets);
    jac.SetBlock(0, 0, A);
    jac.SetBlock(1, 1, A);
 
-
-
-
-
+   // Preconditioner
    HypreBoomerAMG M(*A);
-
    BlockDiagonalPreconditioner precon(bOffsets);
    precon.SetDiagonalBlock(0, &M);
    precon.SetDiagonalBlock(1, &M);
 
+   // Solver
+   CGSolver cg(MPI_COMM_WORLD);
+   cg.SetRelTol(1e-12);
+   cg.SetMaxIter(2000);
+   cg.SetPrintLevel(1);
+   cg.SetPreconditioner(precon);
+   cg.SetOperator(jac);
+   cg.Mult(trueRhs,trueX);
 
-
-   CGSolver cg2(MPI_COMM_WORLD);
-   cg2.SetRelTol(1e-12);
-   cg2.SetMaxIter(2000);
-   cg2.SetPrintLevel(1);
-   cg2.SetPreconditioner(precon);
-   cg2.SetOperator(jac);
-   cg2.Mult(trueRhs,trueX);
-
-
-
-
-
-
-   // Define the gridfunctions
-   ParGridFunction phi_re_gf(&space);
-   ParGridFunction phi_im_gf(&space);
-
-   phi_re_gf.Distribute(trueX.GetBlock(0));
-   phi_im_gf.Distribute(trueX.GetBlock(1));
-
-
-   // Define the visualisation output
-   VisItDataCollection vdc("step", &pmesh);
-   vdc.SetPrefixPath(vis_dir);
-   vdc.RegisterField("phi_re", &phi_re_gf);
-   vdc.RegisterField("phi_im", &phi_im_gf);
-
+   // Visualize solution
+   phi_re.Distribute(trueX.GetBlock(0));
+   phi_im.Distribute(trueX.GetBlock(1));
    vdc.SetCycle(0);
-   // vdc.SetTime(t);
    vdc.Save();
 
+   pdc.SetCycle(0);
+   pdc.Save();
 
    vdc.SetCycle(1);
-   // vdc.SetTime(t);
    vdc.Save();
 
-
-
+   pdc.SetCycle(1);
+   pdc.Save();
 
    // 8. Free the used memory.
    delete fec;
