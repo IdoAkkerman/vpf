@@ -30,17 +30,25 @@ extern void line(int len);
 void CheckBoundaries(Array<bool> &bnd_flags,
                      Array<int> &bc_bnds)
 {
+   for (int b = 0; b < bnd_flags.Size(); b++)
+   {
+      cout<<bnd_flags[b]<<"\t";
+   }
+   cout<<endl;
+
    int amax = bnd_flags.Size();
    // Check strong boundaries
    for (int b = 0; b < bc_bnds.Size(); b++)
    {
       int bnd = bc_bnds[b];
+cout<<"b = "<<b<<" : "<<bnd<<endl;
       if ( bnd < 0 || bnd > amax )
       {
          mfem_error("Boundary out of range.");
       }
       if (bnd_flags[bnd])
       {
+         cout<<bnd<<endl;
          mfem_error("Boundary specified more then once.");
       }
       bnd_flags[bnd] = true;
@@ -131,18 +139,16 @@ int main(int argc, char *argv[])
 
    const char *lib_file = "libfun.so";
 
- /*  args.AddOption(&strong_bdr, "-sbc", "--strong-bdr",
-                  "Boundaries where Dirichelet BCs are enforced strongly.");
-   args.AddOption(&weak_bdr, "-wbc", "--weak-bdr",
-                  "Boundaries where Dirichelet BCs are enforced weakly.");
+   args.AddOption(&freesurf_bdr, "-fs", "--freesurf-bdr",
+                  "Free-surface boundaries.");
+   args.AddOption(&bottom_bdr, "-bot", "--bottom-bdr",
+                  "Bottom Boundaries.");
    args.AddOption(&outflow_bdr, "-out", "--outflow-bdr",
                   "Outflow boundaries.");
-   args.AddOption(&suction_bdr, "-suc", "--suction-bdr",
-                  "Suction boundaries.");
-   args.AddOption(&blowing_bdr, "-blow", "--blowing-bdr",
-                  "Blowing boundaries.");
+   args.AddOption(&inflow_bdr, "-in", "--inflow-bdr",
+                  "Inflow boundaries.");
    args.AddOption(&master_bdr, "-mbc", "--master-bdr",
-                  "Periodic master boundaries.");*/
+                  "Periodic master boundaries.");
    args.AddOption(&slave_bdr, "-sbc", "--slave-bdr",
                   "Periodic slave boundaries.");
    args.AddOption(&lib_file, "-l", "--lib",
@@ -256,14 +262,17 @@ int main(int argc, char *argv[])
    {
       bnd_flag[pmesh.bdr_attributes[b]] = false;
    }
-  /* CheckBoundaries(bnd_flag, strong_bdr);
-   CheckBoundaries(bnd_flag, weak_bdr);
+
+pmesh.bdr_attributes.Print();
+
+   CheckBoundaries(bnd_flag, freesurf_bdr);
+   CheckBoundaries(bnd_flag, bottom_bdr);
    CheckBoundaries(bnd_flag, outflow_bdr);
-   CheckBoundaries(bnd_flag, suction_bdr);
-   CheckBoundaries(bnd_flag, blowing_bdr);*/
+   CheckBoundaries(bnd_flag, inflow_bdr);
+
    CheckBoundaries(bnd_flag, master_bdr);
    CheckBoundaries(bnd_flag, slave_bdr);
-/*
+
    MFEM_VERIFY(master_bdr.Size() == master_bdr.Size(),
                "Master-slave count do not match.");
    for (int b = 0; b < bnd_flag.Size(); b++)
@@ -271,16 +280,6 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(bnd_flag[b],
                  "Not all boundaries have a boundary condition set.");
    }
-*/
-   // Select the time integrator
- //  unique_ptr<ODESolver> ode_solver = ODESolver::Select(ode_solver_type);
- //  int nstate = ode_solver->GetState() ? ode_solver->GetState()->MaxSize() : 0;
-
-//   if (nstate > 1 && ( restart || restart_interval > 0 ))
-//   {
- //     mfem_error("RBVMS restart not available for this time integrator \n"
- //                "Time integrator can have a maximum of one statevector.");
-//   }
 
    // 4. Define a finite element space on the mesh.
    FiniteElementCollection* fec = FECollection::NewH1(order, dim, pmesh.IsNURBS());
@@ -312,6 +311,15 @@ int main(int argc, char *argv[])
    Array<int> boundary_dofs;
    space.GetBoundaryTrueDofs(boundary_dofs);
    boundary_dofs.Print();
+
+
+   Array<int> ess_bdr(pmesh.bdr_attributes.Max());
+   ess_bdr = 0;
+   ess_bdr[3] = 1;
+   ess_bdr.Print();
+   space.GetEssentialTrueDofs(ess_bdr, boundary_dofs);
+   boundary_dofs.Print();
+
 
    // Get vector offsets
    Array<int> bOffsets(3);
@@ -367,18 +375,41 @@ int main(int argc, char *argv[])
    lform_im->ParallelAssemble(trueRhs.GetBlock(1));
    trueRhs.GetBlock(1).SyncAliasMemory(trueRhs);
 
+   //   lform_re->AddBoundaryIntegrator(new BoundaryLFIntegrator(m_nbcCoef), nbc_bdr);
+   //   lform_im->AddBoundaryIntegrator(new BoundaryLFIntegrator(m_nbcCoef), nbc_bdr);
+
    // Bilinear form
    ParBilinearForm poisson(&space);
 
    poisson.AddDomainIntegrator(new DiffusionIntegrator);
    poisson.Assemble();
-   poisson.EliminateVDofs(boundary_dofs);//, *x0, *F);
+   //poisson.EliminateVDofs(boundary_dofs);//, *x0, *F);
    poisson.Finalize();
-   HypreParMatrix *A = poisson.ParallelAssemble();
+
+   ParBilinearForm fs_form(&space);
+   fs_form.AddBdrFaceIntegrator(new BoundaryMassIntegrator(one),freesurf_bdr);
+   fs_form.Assemble();
+   //fs_form.EliminateVDofs(boundary_dofs);//, *x0, *F);
+   fs_form.Finalize();
+
+   ParBilinearForm out_form(&space);
+   out_form.AddBdrFaceIntegrator(new BoundaryMassIntegrator(one),outflow_bdr);
+   out_form.Assemble();
+   //out_form.EliminateVDofs(boundary_dofs);//, *x0, *F);
+   out_form.Finalize();
+
+   HypreParMatrix *A    = poisson.ParallelAssemble();
+   HypreParMatrix *Afs  = fs_form.ParallelAssemble();
+   HypreParMatrix *Aout = out_form.ParallelAssemble();
+
+   A->Add(3.0, *Afs);
+   A->Add(4.0, *Aout);
 
    BlockOperator jac(bOffsets);
    jac.SetBlock(0, 0, A);
    jac.SetBlock(1, 1, A);
+
+
 
    // Preconditioner
    HypreBoomerAMG M(*A);
