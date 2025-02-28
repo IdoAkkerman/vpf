@@ -30,25 +30,17 @@ extern void line(int len);
 void CheckBoundaries(Array<bool> &bnd_flags,
                      Array<int> &bc_bnds)
 {
-   for (int b = 0; b < bnd_flags.Size(); b++)
-   {
-      cout<<bnd_flags[b]<<"\t";
-   }
-   cout<<endl;
-
    int amax = bnd_flags.Size();
    // Check strong boundaries
    for (int b = 0; b < bc_bnds.Size(); b++)
    {
       int bnd = bc_bnds[b];
-      cout<<"b = "<<b<<" : "<<bnd<<endl;
       if ( bnd < 0 || bnd > amax )
       {
          mfem_error("Boundary out of range.");
       }
       if (bnd_flags[bnd])
       {
-         cout<<bnd<<endl;
          mfem_error("Boundary specified more then once.");
       }
       bnd_flags[bnd] = true;
@@ -104,14 +96,14 @@ public:
 
 int main(int argc, char *argv[])
 {
-   // 1. Initialize MPI and HYPRE and print info
+   // Initialize MPI and HYPRE and print info
    Mpi::Init(argc, argv);
    int num_procs = Mpi::WorldSize();
    int myid = Mpi::WorldRank();
    Hypre::Init();
    printInfo();
 
-   // 2. Parse command-line options.
+   // Parse command-line options.
    OptionsParser args(argc, argv);
 
    // Mesh and discretization parameters
@@ -158,37 +150,8 @@ int main(int argc, char *argv[])
                   " - Forcing\n\t"
                   " - Diffusion\n\t");
 
-   // Time stepping params
-   //   Array<int> master_bdr;
-   //   Array<int> slave_bdr;
-
-   // int ode_solver_type = 35;
-   //int ode_solver_type = 35;
-   real_t t_final = 10.0;
-   real_t dt = 0.01;
-   real_t dt_max = 1.0;
-   real_t dt_min = 0.0001;
-
-   real_t cfl_target = 2.0;
-   real_t dt_gain = -1.0;
-
-   //  args.AddOption(&ode_solver_type, "-s", "--ode-solver",
-   //                 ODESolver::ImplicitTypes.c_str());
-   args.AddOption(&t_final, "-tf", "--t-final",
-                  "Final time; start time is 0.");
-   args.AddOption(&dt, "-dt", "--dt",
-                  "Time step.");
-   args.AddOption(&dt_min, "-dtmn", "--dt-min",
-                  "Minimum time step size.");
-   args.AddOption(&dt_max, "-dtmx", "--dt-max",
-                  "Maximum time step size.");
-   args.AddOption(&cfl_target, "-cfl", "--cfl-target",
-                  "CFL target.");
-   args.AddOption(&dt_gain, "-dtg", "--dt-gain",
-                  "Gain coefficient for time step adjustment.");
-
    // Solver parameters
-   double GMRES_RelTol = 1e-3;
+   double GMRES_RelTol = 1e-10;
    int    GMRES_MaxIter = 500;
 
    args.AddOption(&GMRES_RelTol, "-lt", "--linear-tolerance",
@@ -196,23 +159,52 @@ int main(int argc, char *argv[])
    args.AddOption(&GMRES_MaxIter, "-li", "--linear-itermax",
                   "Maximum iteration count for the GMRES solver.");
 
-   // Solution input/output params
-   bool restart = false;
-   int restart_interval = -1;
-   real_t dt_vis = 10*dt;
+   // Wave parameters
+   real_t gravity = 9.81;
+   real_t depth  =  10.0;
+
+   real_t wave_angle_min = 0.0;
+   real_t wave_angle_max = 180.0;
+   int    wave_angle_num = 7;
+
+   real_t wave_length_min = 5.0;
+   real_t wave_length_max = 100.0;
+   int    wave_length_num = 20;
+
+   args.AddOption(&gravity, "-g", "--gravity",
+                  "Gravity parameter (in m/s^2).");
+
+   args.AddOption(&depth, "-d", "--depth",
+                  "Depth of the water (in m).");
+
+   args.AddOption(&wave_angle_min, "-wamn", "--wave-angle-min",
+                  "Wave angle minimum (in deg).");
+
+   args.AddOption(&wave_angle_max, "-wamx", "--wave-angle-max",
+                  "Wave angle maximum (in deg).");
+
+   args.AddOption(&wave_angle_num, "-wan", "--wave-angle-num",
+                  "Number of wave angles to compute. Will uniformly "
+                  "split the interval [wave-angle-min, wave-angle-max]");
+
+   args.AddOption(&wave_length_min, "-wlmn", "--wave-length-min",
+                  "Wave length minimum (in m).");
+
+   args.AddOption(&wave_length_max, "-wlmx", "--wave-length-max",
+                  "Wave length maximum (in m).");
+
+   args.AddOption(&wave_length_num, "-wln", "--wave-length-num",
+                  "Number of wave lengths to compute. Will uniformly "
+                  "split the interval [wave-length-min, wave-length-max]");
+
+   // Solution location
    const char *vis_dir = "solution";
-   args.AddOption(&restart, "-rs", "--restart", "-f", "--fresh",
-                  "Restart from solution.");
-   args.AddOption(&restart_interval, "-ri", "--restart-interval",
-                  "Interval between archieved time steps.\n\t"
-                  "For negative values output is skipped.");
-   args.AddOption(&dt_vis, "-dtv", "--dt_vis",
-                  "Time interval between visualization points.");
+
    args.AddOption(&vis_dir, "-vd", "--vis-dir",
                   "Directory for visualization files.\n\t");
 
    real_t omega = 0.5;
-   real_t gravity = 9.81;
+ //  real_t gravity = 9.81;
    real_t cel = 112.0;
 
 
@@ -225,7 +217,7 @@ int main(int argc, char *argv[])
    }
    if (Mpi::Root()) { args.PrintOptions(cout); }
 
-   // 3. Read the mesh from the given mesh file.
+   // Read the mesh from the given mesh file.
    Mesh mesh(mesh_file, 1, 1);
    int dim = mesh.Dimension();
 
@@ -250,15 +242,13 @@ int main(int argc, char *argv[])
    // Boundary conditions
    if (Mpi::Root())
    {
-      /*    if (strong_bdr.Size()>0) {cout<<"Strong  = "; strong_bdr.Print();}
-          if (weak_bdr.Size()>0) {cout<<"Weak    = "; weak_bdr.Print();}
-          if (outflow_bdr.Size()>0){ cout<<"Outflow = "; outflow_bdr.Print() ;}
-          if (suction_bdr.Size()>0){ cout<<"Suction = "; suction_bdr.Print() ;}
-          if (blowing_bdr.Size()>0){ cout<<"Blowing = "; blowing_bdr.Print() ;}*/
+      if (freesurf_bdr.Size()>0) {cout<<"Free-surface = "; freesurf_bdr.Print();}
+      if (bottom_bdr.Size()>0)   {cout<<"Bottom       = "; bottom_bdr.Print();}
+      if (outflow_bdr.Size()>0)  {cout<<"Outflow      = "; outflow_bdr.Print() ;}
+      if (inflow_bdr.Size()>0)   {cout<<"Inflow       = "; inflow_bdr.Print() ;}
       if (master_bdr.Size()>0) {cout<<"Periodic (master) = "; master_bdr.Print();}
       if (slave_bdr.Size()>0) {cout<<"Periodic (slave)  = "; slave_bdr.Print();}
    }
-
 
    Array<bool> bnd_flag(pmesh.bdr_attributes.Max()+1);
    bnd_flag = true;
@@ -267,13 +257,10 @@ int main(int argc, char *argv[])
       bnd_flag[pmesh.bdr_attributes[b]] = false;
    }
 
-   pmesh.bdr_attributes.Print();
-
    CheckBoundaries(bnd_flag, freesurf_bdr);
    CheckBoundaries(bnd_flag, bottom_bdr);
    CheckBoundaries(bnd_flag, outflow_bdr);
    CheckBoundaries(bnd_flag, inflow_bdr);
-
    CheckBoundaries(bnd_flag, master_bdr);
    CheckBoundaries(bnd_flag, slave_bdr);
 
@@ -285,14 +272,14 @@ int main(int argc, char *argv[])
                   "Not all boundaries have a boundary condition set.");
    }
 
-   // 4. Define a finite element space on the mesh.
+   // Define a finite element space on the mesh.
    FiniteElementCollection* fec = FECollection::NewH1(order, dim, pmesh.IsNURBS());
 
    ParFiniteElementSpace space(&pmesh, fec, 1,  Ordering::byNODES);
    //, Ordering::byVDIM);
    // ,master_bdr, slave_bdr);
 
-   // Report the degree of freedoms used
+   // Report the degree of freedoms
    {
       Array<int> tdof(num_procs),dof(num_procs);
       tdof = 0;
@@ -306,24 +293,14 @@ int main(int argc, char *argv[])
       {
          mfem::out << "Number of finite element unknowns: ";
          mfem::out << dof_t << " " <<dof_t  << endl;
-         mfem::out << "Number of finite element unknowns per partition: \n";
-         dof.Print(mfem::out, num_procs);
-         dof.Print(mfem::out, num_procs);
+         if ( num_procs > 1)
+         {
+            mfem::out << "Number of finite element unknowns per partition: \n";
+            dof.Print(mfem::out, num_procs);
+            dof.Print(mfem::out, num_procs);
+         }
       }
    }
-
-   Array<int> boundary_dofs;
-   space.GetBoundaryTrueDofs(boundary_dofs);
-   boundary_dofs.Print();
-
-
-   Array<int> ess_bdr(pmesh.bdr_attributes.Max());
-   ess_bdr = 0;
-   ess_bdr[3] = 1;
-   ess_bdr.Print();
-   space.GetEssentialTrueDofs(ess_bdr, boundary_dofs);
-   boundary_dofs.Print();
-
 
    // Get vector offsets
    Array<int> bOffsets(3);
@@ -360,7 +337,7 @@ int main(int argc, char *argv[])
    pdc.RegisterField("phi_re", &phi_re);
    pdc.RegisterField("phi_im", &phi_im);
 
-   // Linear form
+   // Compute the linear forms
    ConstantCoefficient one(1.0);
    ParLinearForm *lform_re(new ParLinearForm);
    lform_re->Update(&space, rhs.GetBlock(0), 0);
@@ -382,34 +359,92 @@ int main(int argc, char *argv[])
    //   lform_re->AddBoundaryIntegrator(new BoundaryLFIntegrator(m_nbcCoef), nbc_bdr);
    //   lform_im->AddBoundaryIntegrator(new BoundaryLFIntegrator(m_nbcCoef), nbc_bdr);
 
-   // Bilinear form
+   // Compute the bilinear forms
    ParBilinearForm poisson(&space);
    poisson.AddDomainIntegrator(new DiffusionIntegrator);
    poisson.Assemble();
-   //   poisson.EliminateVDofs(boundary_dofs);//, *x0, *F);
    poisson.Finalize();
-
 
    ConstantCoefficient zero(1e-100);
    ParBilinearForm fs_form(&space);
    fs_form.AddDomainIntegrator(new MassIntegrator(zero));
    fs_form.AddBdrFaceIntegrator(new BoundaryMassIntegrator(one),freesurf_bdr);
    fs_form.Assemble();
-   //   fs_form.EliminateVDofs(boundary_dofs);//, *x0, *F);
    fs_form.Finalize();
 
    ParBilinearForm out_form(&space);
    out_form.AddDomainIntegrator(new MassIntegrator(zero));
    out_form.AddBdrFaceIntegrator(new BoundaryMassIntegrator(one),outflow_bdr);
    out_form.Assemble();
-   //  out_form.EliminateVDofs(boundary_dofs);//, *x0, *F);
    out_form.Finalize();
 
    HypreParMatrix *A    = poisson.ParallelAssemble();
    HypreParMatrix *Afs  = fs_form.ParallelAssemble();
    HypreParMatrix *Aout = out_form.ParallelAssemble();
-   //Afs->Print("Afs");
 
+   // Set Solver
+   GMRESSolver solver(MPI_COMM_WORLD);
+   solver.SetRelTol(GMRES_RelTol);
+   solver.SetAbsTol(1e-10);
+   solver.SetMaxIter(GMRES_MaxIter);
+   solver.SetPrintLevel(2);
+
+   // Loop over wave conditions
+   real_t dwa = (wave_angle_max- wave_angle_min)/(wave_angle_num - 1);
+   real_t dwl = (wave_length_max - wave_length_min)/(wave_length_num - 1);
+
+   for (int ia = 0; ia < wave_angle_num; ia++)
+   {
+      real_t angle = wave_angle_min + ia*dwa;
+      for (int il = 0; il < wave_length_num; il++)
+      {
+         real_t length = wave_length_min + il*dwl;
+         real_t k = 2*M_PI/length;
+         real_t omega = sqrt(gravity*k*tanh(k*depth));
+         real_t celerity = omega/k;
+         cout<<"========================================"<<endl;
+         cout<<" Wave parameters"<<endl;
+         cout<<"========================================"<<endl;
+         cout<<" Angle    = "<<angle<<endl;
+         cout<<" Length   = "<<length<<endl;
+         cout<<" Omega    = "<<omega<<endl;
+         cout<<" Celerity = "<<celerity<<endl;
+
+         // Set matrix
+         HypreParMatrix Ad(*A);
+         Ad.Add(-omega*omega/gravity, *Afs);
+
+         BlockOperator jac(bOffsets);
+         jac.SetBlock(0, 0, &Ad);
+         jac.SetBlock(0, 1, Aout, omega/celerity);
+
+         jac.SetBlock(1, 0, Aout, -omega/celerity);
+         jac.SetBlock(1, 1, &Ad);
+
+         // Preconditioner
+         HypreEuclid M(Ad);
+         BlockDiagonalPreconditioner precon(bOffsets);
+         precon.SetDiagonalBlock(0, &M);
+         precon.SetDiagonalBlock(1, &M);
+
+         // Solve
+         solver.SetPreconditioner(precon);
+         solver.SetOperator(jac);
+         solver.Mult(trueRhs,trueX);
+
+
+         // Visualize solution
+         phi_re.Distribute(trueX.GetBlock(0));
+         phi_im.Distribute(trueX.GetBlock(1));
+         vdc.SetCycle(ia*1000+il);
+         vdc.Save();
+
+         pdc.SetCycle(ia*1000+il);
+         pdc.Save();
+
+      }
+   }
+ /*  omega = 0.5;
    for (int l = 0; l < 15; l++)
    {
 
@@ -427,20 +462,24 @@ int main(int argc, char *argv[])
       jac.SetBlock(1, 1, &Ad);
 
       // Preconditioner
-      //   HypreBoomerAMG M(Ad);
       HypreSmoother M(Ad);
       BlockDiagonalPreconditioner precon(bOffsets);
       precon.SetDiagonalBlock(0, &M);
       precon.SetDiagonalBlock(1, &M);
 
       // Solver
-      CGSolver cg(MPI_COMM_WORLD);
-      cg.SetRelTol(1e-12);
-      cg.SetMaxIter(2000);
-      cg.SetPrintLevel(1);
-      cg.SetPreconditioner(precon);
-      cg.SetOperator(jac);
-      cg.Mult(trueRhs,trueX);
+   //   CGSolver cg(MPI_COMM_WORLD);
+   //   cg.SetRelTol(1e-12);
+    //  cg.SetMaxIter(2000);
+   //   cg.SetPrintLevel(1);
+    //  cg.SetPreconditioner(precon);
+   //   cg.SetOperator(jac);
+   //   cg.Mult(trueRhs,trueX);
+
+         // Solve
+         solver.SetPreconditioner(precon);
+         solver.SetOperator(jac);
+         solver.Mult(trueRhs,trueX);
 
       // Visualize solution
       phi_re.Distribute(trueX.GetBlock(0));
@@ -450,9 +489,9 @@ int main(int argc, char *argv[])
 
       pdc.SetCycle(l);
       pdc.Save();
-   }
+   }*/
 
-   // 8. Free the used memory.
+   // Free the used memory.
    delete fec;
 
    return 0;
