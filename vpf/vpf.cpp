@@ -13,6 +13,7 @@
 //------------------------------------------------------------------------------
 
 #include "mfem.hpp"
+#include "waveOper.hpp"
 //#include "coefficients.hpp"
 //#include "weakform.hpp"
 //#include "evolution.hpp"
@@ -46,6 +47,25 @@ void CheckBoundaries(Array<bool> &bnd_flags,
       bnd_flags[bnd] = true;
    }
 }
+
+void GetBoundaryMarkers(Array<int> &bnd_flags,
+                        Array<int> &bnd_attr,
+                        Array<int> &bc_bnds)
+{
+   int amax = bnd_flags.Size();
+   bnd_flags = 0;
+   // Check strong boundaries
+   for (int b = 0; b < bc_bnds.Size(); b++)
+   {
+      int bnd = bc_bnds[b];
+      if ( bnd < 0 || bnd > amax )
+      {
+         mfem_error("Boundary out of range.");
+      }
+      bnd_flags[bnd-1] = 1;
+   }
+}
+
 
 // Custom block preconditioner for the Jacobian
 class JacobianPreconditioner : public
@@ -94,6 +114,7 @@ public:
 
 };
 
+
 int main(int argc, char *argv[])
 {
    // Initialize MPI and HYPRE and print info
@@ -107,7 +128,7 @@ int main(int argc, char *argv[])
    OptionsParser args(argc, argv);
 
    // Mesh and discretization parameters
-   const char *mesh_file = "../../mfem/data/inline-quad.mesh";
+   const char *mesh_file = "../../mfem/data/inline-hex.mesh";
    const char *ref_file  = "";
    int order = 1;
    int ref_levels = 0;
@@ -150,32 +171,19 @@ int main(int argc, char *argv[])
                   " - Forcing\n\t"
                   " - Diffusion\n\t");
 
-   // Solver parameters
-   double GMRES_RelTol = 1e-10;
-   int    GMRES_MaxIter = 500;
-
-   args.AddOption(&GMRES_RelTol, "-lt", "--linear-tolerance",
-                  "Relative tolerance for the GMRES solver.");
-   args.AddOption(&GMRES_MaxIter, "-li", "--linear-itermax",
-                  "Maximum iteration count for the GMRES solver.");
-
    // Wave parameters
    real_t gravity = 9.81;
-   real_t depth  =  10.0;
 
    real_t wave_angle_min = 0.0;
-   real_t wave_angle_max = 180.0;
-   int    wave_angle_num = 7;
+   real_t wave_angle_max = 90.0;
+   int    wave_angle_num = 4;
 
-   real_t wave_length_min = 5.0;
+   real_t wave_length_min = 20.0;
    real_t wave_length_max = 100.0;
-   int    wave_length_num = 20;
+   int    wave_length_num = 5;
 
    args.AddOption(&gravity, "-g", "--gravity",
                   "Gravity parameter (in m/s^2).");
-
-   args.AddOption(&depth, "-d", "--depth",
-                  "Depth of the water (in m).");
 
    args.AddOption(&wave_angle_min, "-wamn", "--wave-angle-min",
                   "Wave angle minimum (in deg).");
@@ -197,16 +205,60 @@ int main(int argc, char *argv[])
                   "Number of wave lengths to compute. Will uniformly "
                   "split the interval [wave-length-min, wave-length-max]");
 
-   // Solution location
-   const char *vis_dir = "solution";
+   // Time stepping params
+   int ode_solver_type = 45;
+   real_t t_final = 10.0;
+   real_t dt = 0.01;
+   real_t dt_max = 1.0;
+   real_t dt_min = 0.0001;
 
+   real_t cfl_target = 2.0;
+   real_t dt_gain = -1.0;
+
+   args.AddOption(&ode_solver_type, "-s", "--ode-solver",
+                  ODESolver::ImplicitTypes.c_str());
+   args.AddOption(&t_final, "-tf", "--t-final",
+                  "Final time; start time is 0.");
+   args.AddOption(&dt, "-dt", "--dt",
+                  "Time step.");
+   args.AddOption(&dt_min, "-dtmn", "--dt-min",
+                  "Minimum time step size.");
+   args.AddOption(&dt_max, "-dtmx", "--dt-max",
+                  "Maximum time step size.");
+   args.AddOption(&cfl_target, "-cfl", "--cfl-target",
+                  "CFL target.");
+   args.AddOption(&dt_gain, "-dtg", "--dt-gain",
+                  "Gain coefficient for time step adjustment.");
+
+   // Solver parameters
+   double GMRES_RelTol = 1e-3;
+   int    GMRES_MaxIter = 500;
+   double Newton_RelTol = 1e-3;
+   int    Newton_MaxIter = 10;
+
+   args.AddOption(&GMRES_RelTol, "-lt", "--linear-tolerance",
+                  "Relative tolerance for the GMRES solver.");
+   args.AddOption(&GMRES_MaxIter, "-li", "--linear-itermax",
+                  "Maximum iteration count for the GMRES solver.");
+   args.AddOption(&Newton_RelTol, "-nt", "--newton-tolerance",
+                  "Relative tolerance for the Newton solver.");
+   args.AddOption(&Newton_MaxIter, "-ni", "--newton-itermax",
+                  "Maximum iteration count for the Newton solver.");
+
+   // Solution input/output params
+   bool restart = false;
+   int restart_interval = -1;
+   real_t dt_vis = 10*dt;
+   const char *vis_dir = "solution";
+   args.AddOption(&restart, "-rs", "--restart", "-f", "--fresh",
+                  "Restart from solution.");
+   args.AddOption(&restart_interval, "-ri", "--restart-interval",
+                  "Interval between archieved time steps.\n\t"
+                  "For negative values output is skipped.");
+   args.AddOption(&dt_vis, "-dtv", "--dt_vis",
+                  "Time interval between visualization points.");
    args.AddOption(&vis_dir, "-vd", "--vis-dir",
                   "Directory for visualization files.\n\t");
-
-   real_t omega = 0.5;
- //  real_t gravity = 9.81;
-   real_t cel = 112.0;
-
 
    // Parse parameters
    args.Parse();
@@ -217,9 +269,22 @@ int main(int argc, char *argv[])
    }
    if (Mpi::Root()) { args.PrintOptions(cout); }
 
-   // Read the mesh from the given mesh file.
+   // Select time integrator
+   unique_ptr<ODESolver> ode_solver = ODESolver::Select(ode_solver_type);
+   int nstate = ode_solver->GetState() ? ode_solver->GetState()->MaxSize() : 0;
+
+   if (nstate > 1 && ( restart || restart_interval > 0 ))
+   {
+      mfem_error("RBVMS restart not available for this time integrator \n"
+                 "Time integrator can have a maximum of one statevector.");
+   }
+
+   // Read mesh
    Mesh mesh(mesh_file, 1, 1);
    int dim = mesh.Dimension();
+   Vector min(dim), max(dim);
+   mesh.GetBoundingBox(min, max);
+   real_t depth = max(dim-1) - min(dim-1);
 
    // Refine mesh
    {
@@ -239,42 +304,9 @@ int main(int argc, char *argv[])
    ParMesh pmesh(MPI_COMM_WORLD, mesh);
    mesh.Clear();
 
-   // Boundary conditions
-   if (Mpi::Root())
-   {
-      if (freesurf_bdr.Size()>0) {cout<<"Free-surface = "; freesurf_bdr.Print();}
-      if (bottom_bdr.Size()>0)   {cout<<"Bottom       = "; bottom_bdr.Print();}
-      if (outflow_bdr.Size()>0)  {cout<<"Outflow      = "; outflow_bdr.Print() ;}
-      if (inflow_bdr.Size()>0)   {cout<<"Inflow       = "; inflow_bdr.Print() ;}
-      if (master_bdr.Size()>0) {cout<<"Periodic (master) = "; master_bdr.Print();}
-      if (slave_bdr.Size()>0) {cout<<"Periodic (slave)  = "; slave_bdr.Print();}
-   }
 
-   Array<bool> bnd_flag(pmesh.bdr_attributes.Max()+1);
-   bnd_flag = true;
-   for (int b = 0; b < pmesh.bdr_attributes.Size(); b++)
-   {
-      bnd_flag[pmesh.bdr_attributes[b]] = false;
-   }
-
-   CheckBoundaries(bnd_flag, freesurf_bdr);
-   CheckBoundaries(bnd_flag, bottom_bdr);
-   CheckBoundaries(bnd_flag, outflow_bdr);
-   CheckBoundaries(bnd_flag, inflow_bdr);
-   CheckBoundaries(bnd_flag, master_bdr);
-   CheckBoundaries(bnd_flag, slave_bdr);
-
-   MFEM_VERIFY(master_bdr.Size() == master_bdr.Size(),
-               "Master-slave count do not match.");
-   for (int b = 0; b < bnd_flag.Size(); b++)
-   {
-      MFEM_VERIFY(bnd_flag[b],
-                  "Not all boundaries have a boundary condition set.");
-   }
-
-   // Define a finite element space on the mesh.
+   // Define a finite element space
    FiniteElementCollection* fec = FECollection::NewH1(order, dim, pmesh.IsNURBS());
-
    ParFiniteElementSpace space(&pmesh, fec, 1,  Ordering::byNODES);
    //, Ordering::byVDIM);
    // ,master_bdr, slave_bdr);
@@ -286,7 +318,6 @@ int main(int argc, char *argv[])
       tdof[myid] = space.TrueVSize();
       MPI_Reduce(tdof.GetData(), dof.GetData(), num_procs,
                  MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
-
 
       int dof_t = space.GlobalTrueVSize();
       if (Mpi::Root())
@@ -318,181 +349,364 @@ int main(int argc, char *argv[])
    // Define the vectors
    BlockVector x(bOffsets), rhs(bOffsets);
    BlockVector trueX(btOffsets), trueRhs(btOffsets);
+   trueX = 0.0;
+   trueRhs = 0.0;
+
+   BlockVector xp(bOffsets);
+   BlockVector dxp(bOffsets);
+   BlockVector xp0(bOffsets);
+   BlockVector xpi(bOffsets);
 
    // Define the gridfunctions
-   ParGridFunction phi_re(&space);
-   ParGridFunction phi_im(&space);
+   ParGridFunction phi(&space);
+   ParGridFunction eta(&space);
+
+   Array<ParGridFunction*> dphi(nstate);
+   Array<ParGridFunction*> deta(nstate);
+
+   for (int i = 0; i < nstate; i++)
+   {
+      dphi[i] = new ParGridFunction(&space);
+      deta[i] = new ParGridFunction(&space);
+   }
 
    // Define the visit visualisation output
    VisItDataCollection vdc("step", &pmesh);
    vdc.SetPrefixPath(vis_dir);
-   vdc.RegisterField("phi_re", &phi_re);
-   vdc.RegisterField("phi_im", &phi_im);
+   vdc.RegisterField("phi", &phi);
+   vdc.RegisterField("eta", &eta);
 
    // Define the paraview visualisation output
    ParaViewDataCollection pdc(vis_dir, &pmesh);
    pdc.SetLevelsOfDetail(order);
    pdc.SetDataFormat(VTKFormat::BINARY);
    pdc.SetHighOrderOutput(true);
-   pdc.RegisterField("phi_re", &phi_re);
-   pdc.RegisterField("phi_im", &phi_im);
+   pdc.RegisterField("phi", &phi);
+   pdc.RegisterField("eta", &eta);
 
-   // Compute the linear forms
-   ConstantCoefficient one(1.0);
-   ParLinearForm *lform_re(new ParLinearForm);
-   lform_re->Update(&space, rhs.GetBlock(0), 0);
-   lform_re->AddDomainIntegrator(new DomainLFIntegrator(one));
-   lform_re->Assemble();
-   lform_re->SyncAliasMemory(rhs);
-   lform_re->ParallelAssemble(trueRhs.GetBlock(0));
-   trueRhs.GetBlock(0).SyncAliasMemory(trueRhs);
+   // Define the restart output
+   VisItDataCollection rdc("step", &pmesh);
+   rdc.SetPrefixPath("restart");
+   rdc.SetPrecision(18);
 
-   ConstantCoefficient two(2.0);
-   ParLinearForm *lform_im(new ParLinearForm);
-   lform_im->Update(&space, rhs.GetBlock(1), 0);
-   lform_im->AddDomainIntegrator(new DomainLFIntegrator(two));
-   lform_im->Assemble();
-   lform_im->SyncAliasMemory(rhs);
-   lform_im->ParallelAssemble(trueRhs.GetBlock(1));
-   trueRhs.GetBlock(1).SyncAliasMemory(trueRhs);
-
-   //   lform_re->AddBoundaryIntegrator(new BoundaryLFIntegrator(m_nbcCoef), nbc_bdr);
-   //   lform_im->AddBoundaryIntegrator(new BoundaryLFIntegrator(m_nbcCoef), nbc_bdr);
-
-   // Compute the bilinear forms
-   ParBilinearForm poisson(&space);
-   poisson.AddDomainIntegrator(new DiffusionIntegrator);
-   poisson.Assemble();
-   poisson.Finalize();
-
-   ConstantCoefficient zero(1e-100);
-   ParBilinearForm fs_form(&space);
-   fs_form.AddDomainIntegrator(new MassIntegrator(zero));
-   fs_form.AddBdrFaceIntegrator(new BoundaryMassIntegrator(one),freesurf_bdr);
-   fs_form.Assemble();
-   fs_form.Finalize();
-
-   ParBilinearForm out_form(&space);
-   out_form.AddDomainIntegrator(new MassIntegrator(zero));
-   out_form.AddBdrFaceIntegrator(new BoundaryMassIntegrator(one),outflow_bdr);
-   out_form.Assemble();
-   out_form.Finalize();
-
-   HypreParMatrix *A    = poisson.ParallelAssemble();
-   HypreParMatrix *Afs  = fs_form.ParallelAssemble();
-   HypreParMatrix *Aout = out_form.ParallelAssemble();
-
-   // Set Solver
-   GMRESSolver solver(MPI_COMM_WORLD);
-   solver.SetRelTol(GMRES_RelTol);
-   solver.SetAbsTol(1e-10);
-   solver.SetMaxIter(GMRES_MaxIter);
-   solver.SetPrintLevel(2);
-
-   // Loop over wave conditions
-   real_t dwa = (wave_angle_max- wave_angle_min)/(wave_angle_num - 1);
-   real_t dwl = (wave_length_max - wave_length_min)/(wave_length_num - 1);
-
-   for (int ia = 0; ia < wave_angle_num; ia++)
+   // Get the start vector(s) from file -- or from function
+   real_t t;
+   int si, ri, vi;
+   struct stat info;
+   if (restart && stat("restart/step.dat", &info) == 0)
    {
-      real_t angle = wave_angle_min + ia*dwa;
-      for (int il = 0; il < wave_length_num; il++)
+      // Read
+      if (Mpi::Root())
       {
-         real_t length = wave_length_min + il*dwl;
-         real_t k = 2*M_PI/length;
-         real_t omega = sqrt(gravity*k*tanh(k*depth));
-         real_t celerity = omega/k;
-         cout<<"========================================"<<endl;
-         cout<<" Wave parameters"<<endl;
-         cout<<"========================================"<<endl;
-         cout<<" Angle    = "<<angle<<endl;
-         cout<<" Length   = "<<length<<endl;
-         cout<<" Omega    = "<<omega<<endl;
-         cout<<" Celerity = "<<celerity<<endl;
+         real_t dtr;
+         std::ifstream in("restart/step.dat", std::ifstream::in);
+         in>>t>>si>>ri>>vi;
+         in>>dtr;
+         in.close();
+         cout<<"Restarting from step "<<ri-1<<endl;
+         if (dt_gain > 0) { dt = dtr; }
+      }
+      // Synchronize
+      MPI_Bcast(&t, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+      MPI_Bcast(&dt, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+      MPI_Bcast(&si, 1, MPI_INT, 0, MPI_COMM_WORLD);
+      MPI_Bcast(&ri, 1, MPI_INT, 0, MPI_COMM_WORLD);
+      MPI_Bcast(&vi, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-         // Set matrix
-         HypreParMatrix Ad(*A);
-         Ad.Add(-omega*omega/gravity, *Afs);
+      // Open data files
+      rdc.Load(ri-1);
 
-         BlockOperator jac(bOffsets);
-         jac.SetBlock(0, 0, &Ad);
-         jac.SetBlock(0, 1, Aout, omega/celerity);
+      phi = *rdc.GetField("phi");
+      eta = *rdc.GetField("eta");
 
-         jac.SetBlock(1, 0, Aout, -omega/celerity);
-         jac.SetBlock(1, 1, &Ad);
+      phi.GetTrueDofs(xp.GetBlock(0));
+      eta.GetTrueDofs(xp.GetBlock(1));
 
-         // Preconditioner
-         HypreEuclid M(Ad);
-         BlockDiagonalPreconditioner precon(bOffsets);
-         precon.SetDiagonalBlock(0, &M);
-         precon.SetDiagonalBlock(1, &M);
+      if (nstate == 1)
+      {
+         *dphi[0] = *rdc.GetField("dphi");
+         *deta[0] = *rdc.GetField("deta");
 
-         // Solve
-         solver.SetPreconditioner(precon);
-         solver.SetOperator(jac);
-         solver.Mult(trueRhs,trueX);
+         dphi[0]->GetTrueDofs(dxp.GetBlock(0));
+         deta[0]->GetTrueDofs(dxp.GetBlock(1));
 
-
-         // Visualize solution
-         phi_re.Distribute(trueX.GetBlock(0));
-         phi_im.Distribute(trueX.GetBlock(1));
-         vdc.SetCycle(ia*1000+il);
-         vdc.Save();
-
-         pdc.SetCycle(ia*1000+il);
-         pdc.Save();
-
+         ode_solver->GetState()->Append(dxp);
       }
    }
- /*  omega = 0.5;
-   for (int l = 0; l < 15; l++)
+   else
    {
+      // Define initial condition from file
+      t = 0.0; si = 0; ri = 1; vi = 1;
+  //    LibVectorCoefficient sol(dim, lib_file, "sol_u");
+//      sol.SetTime(-1.0);
+   //   phi = 0;//.ProjectCoefficient(sol);
+      phi = 0.0;
+      eta = 0.0;
 
-      omega *=1.1;
+      phi.GetTrueDofs(xp.GetBlock(0));
+      eta.GetTrueDofs(xp.GetBlock(1));
 
-
-      HypreParMatrix Ad(*A);
-      Ad.Add(-omega*omega/gravity, *Afs);
-
-      BlockOperator jac(bOffsets);
-      jac.SetBlock(0, 0, &Ad);
-      jac.SetBlock(0, 1, Aout, omega/cel);
-
-      jac.SetBlock(1, 0, Aout, -omega/cel);
-      jac.SetBlock(1, 1, &Ad);
-
-      // Preconditioner
-      HypreSmoother M(Ad);
-      BlockDiagonalPreconditioner precon(bOffsets);
-      precon.SetDiagonalBlock(0, &M);
-      precon.SetDiagonalBlock(1, &M);
-
-      // Solver
-   //   CGSolver cg(MPI_COMM_WORLD);
-   //   cg.SetRelTol(1e-12);
-    //  cg.SetMaxIter(2000);
-   //   cg.SetPrintLevel(1);
-    //  cg.SetPreconditioner(precon);
-   //   cg.SetOperator(jac);
-   //   cg.Mult(trueRhs,trueX);
-
-         // Solve
-         solver.SetPreconditioner(precon);
-         solver.SetOperator(jac);
-         solver.Mult(trueRhs,trueX);
-
-      // Visualize solution
-      phi_re.Distribute(trueX.GetBlock(0));
-      phi_im.Distribute(trueX.GetBlock(1));
-      vdc.SetCycle(l);
+      // Visualize initial condition
+      vdc.SetCycle(0);
+      vdc.SetTime(0.0);
       vdc.Save();
 
-      pdc.SetCycle(l);
-      pdc.Save();
+      // Define the restart writer
+      rdc.RegisterField("phi", &phi);
+      rdc.RegisterField("eta", &eta);
+      if (nstate == 1)
+      {
+         rdc.RegisterField("dphi", dphi[0]);
+         rdc.RegisterField("deta", deta[0]);
+      }
+   }
+
+   ///
+   real_t speed = 1.0;
+   WaveOperator oper(space, speed);
+   ode_solver->Init(oper);
+
+
+   // Boundary conditions
+   if (Mpi::Root())
+   {
+      if (freesurf_bdr.Size()>0) {cout<<"Free-surface = "; freesurf_bdr.Print();}
+      if (bottom_bdr.Size()>0)   {cout<<"Bottom       = "; bottom_bdr.Print();}
+      if (outflow_bdr.Size()>0)  {cout<<"Outflow      = "; outflow_bdr.Print();}
+      if (inflow_bdr.Size()>0)   {cout<<"Inflow       = "; inflow_bdr.Print();}
+      if (master_bdr.Size()>0) {cout<<"Periodic (master) = "; master_bdr.Print();}
+      if (slave_bdr.Size()>0) {cout<<"Periodic (slave)  = "; slave_bdr.Print();}
+   }
+
+   Array<bool> bnd_flag(pmesh.bdr_attributes.Max()+1);
+   bnd_flag = true;
+   for (int b = 0; b < pmesh.bdr_attributes.Size(); b++)
+   {
+      bnd_flag[pmesh.bdr_attributes[b]] = false;
+   }
+
+   CheckBoundaries(bnd_flag, freesurf_bdr);
+   CheckBoundaries(bnd_flag, bottom_bdr);
+   CheckBoundaries(bnd_flag, outflow_bdr);
+   CheckBoundaries(bnd_flag, inflow_bdr);
+   CheckBoundaries(bnd_flag, master_bdr);
+   CheckBoundaries(bnd_flag, slave_bdr);
+
+/*   MFEM_VERIFY(master_bdr.Size() == master_bdr.Size(),
+               "Master-slave count do not match.");
+   for (int b = 0; b < bnd_flag.Size(); b++)
+   {
+      MFEM_VERIFY(bnd_flag[b],
+                  "Not all boundaries have a boundary condition set.");
    }*/
 
-   // Free the used memory.
-   delete fec;
+
+
+   // 7. Actual time integration
+
+   // Open output file
+   std::ofstream os;
+   if (Mpi::Root())
+   {
+      std::ostringstream filename;
+      filename << "output_"<<std::setw(6)<<setfill('0')<<si<< ".dat";
+      os.open(filename.str().c_str());
+
+      // Header
+      char dimName[] = "xyz";
+      int i = 6;
+      os <<"# 1: step"<<"\t"<<"2: time"<<"\t"<<"3: dt"<<"\t"
+         <<"4: cfl"<<"\t"<<"5: outflow"<<"\t";
+
+      for (int b=0; b<pmesh.bdr_attributes.Size(); ++b)
+      {
+         int bnd = pmesh.bdr_attributes[b];
+         for (int v=0; v<dim; ++v)
+         {
+            std::ostringstream forcename;
+            forcename <<i++<<": F"<<dimName[v]<<"_"<<bnd;
+            os<<forcename.str()<<"\t";
+         }
+      }
+      os<<endl;
+   }
+
+   // Loop till final time reached
+   while (t < t_final)
+   {
+      // Print header
+      if (Mpi::Root())
+      {
+         line(80);
+         cout<<std::defaultfloat<<std::setprecision(4);
+         cout<<" step = " << si << endl;
+         cout<<"   dt = " << dt << endl;
+         cout<<std::defaultfloat<<std::setprecision(6);;
+         cout<<" time = [" << t << ", " << t+dt <<"]"<< endl;
+         cout<<std::defaultfloat<<std::setprecision(4);
+         line(80);
+      }
+
+      // Actual time step
+      xp0 = xp;
+      ode_solver->Step(xp, t, dt);
+      si++;
+
+      // Postprocess solution
+    //  real_t cfl = evo.GetCFL();
+    //  real_t outflow = evo.GetOutflow();
+   //   DenseMatrix bdrForce = evo.GetForce();
+      if (Mpi::Root())
+      {
+         // Print to file
+       /*  int nbdr = pmesh.bdr_attributes.Size();
+         os << std::setw(10);
+         os << si<<"\t"<<t<<"\t"<<dt<<"\t"<<cfl<<"\t"<<outflow<<"\t";
+         for (int b=0; b<nbdr; ++b)
+         {
+            int bnd = pmesh.bdr_attributes[b];
+            for (int v=0; v<dim; ++v)
+            {
+               os<<bdrForce(bnd-1,v)<<"\t";
+            }
+         }
+         os<<"\n"<< std::flush;*/
+
+         // Print line lambda function
+         auto pline = [](int len)
+         {
+            cout<<" +";
+            for (int b=0; b<len; ++b) { cout<<"-"; }
+            cout<<"+\n";
+         };
+
+         // Print boundary header
+         /*cout<<"\n";
+         pline(10+13*nbdr);
+         cout<<" | Boundary | ";
+         for (int b=0; b<nbdr; ++b)
+         {
+            cout<<std::setw(10)<<pmesh.bdr_attributes[b]<<" | ";
+         }
+         cout<<"\n";
+         pline(10+13*nbdr);
+
+         // Print actual forces
+         char dimName[] = "xyz";
+         for (int v=0; v<dim; ++v)
+         {
+            cout<<" | Force "<<dimName[v]<<"  | ";
+            for (int b=0; b<nbdr; ++b)
+            {
+               int bnd = pmesh.bdr_attributes[b];
+               cout<<std::defaultfloat<<std::setprecision(4)<<std::setw(10);
+               cout<<bdrForce(bnd-1,v)<<" | ";
+            }
+            cout<<"\n";
+         }
+         pline(10+13*nbdr);
+         cout<<"\n"<<std::flush;*/
+      }
+
+      // Write visualization files
+      while (t >= dt_vis*vi)
+      {
+         // Interpolate solution
+         real_t fac = (t-dt_vis*vi)/dt;
+
+         // Report to screen
+         if (Mpi::Root())
+         {
+            line(80);
+            cout << "Visit output: " <<vi << endl;
+            cout << "        Time: " <<t-dt<<" "<<t-fac*dt<<" "<<t<<endl;
+            line(80);
+         }
+
+         // Copy solution in grid functions
+         add (fac, xp0.GetBlock(0),(1.0-fac), xp.GetBlock(0), xpi.GetBlock(0));
+         phi.Distribute(xpi.GetBlock(0));
+
+         add (-1.0/dt, xp0.GetBlock(1), 1.0/dt, xp.GetBlock(1), xpi.GetBlock(1));
+         eta.Distribute(xpi.GetBlock(1));
+
+         // Actually write to file
+         vdc.SetCycle(vi);
+         vdc.SetTime(dt_vis*vi);
+         vdc.Save();
+         vi++;
+      }
+
+      // Change time step
+      //real_t dt0 = dt;
+      //if ((dt_gain > 0))
+     // {
+      //   dt *= pow(cfl_target/cfl, dt_gain);
+       //  dt = min(dt, dt_max);
+        // dt = max(dt, dt_min);
+    //  }
+
+      // Print cfl and dt to screen
+      if (Mpi::Root())
+      {
+         line(80);
+       //  cout<<" outflow = "<<outflow<<endl;
+      //   cout<<" cfl = "<<cfl<<endl;
+         cout<<" dt  = "<<dt<<" --> "<<dt<<endl;
+         line(80);
+      }
+
+      // Write restart files
+      if (restart_interval > 0 && si%restart_interval == 0)
+      {
+         // Report to screen
+         if (Mpi::Root())
+         {
+            line(80);
+            cout << "Restart output:" << ri << endl;
+            line(80);
+         }
+
+         // Copy solution in grid functions
+         phi.Distribute(xp.GetBlock(0));
+         eta.Distribute(xp.GetBlock(1));
+
+         if (nstate == 1)
+         {
+            ode_solver->GetState()->Get(0,dxp);
+            dphi[0]->Distribute(dxp.GetBlock(0));
+            deta[0]->Distribute(dxp.GetBlock(1));
+         }
+
+         // Actually write to file
+         rdc.SetCycle(ri);
+         rdc.SetTime(t);
+         rdc.Save();
+         ri++;
+
+         // print meta file
+         if (Mpi::Root())
+         {
+            std::ofstream step("restart/step.dat", std::ifstream::out);
+            step<<t<<"\t"<<si<<"\t"<<ri<<"\t"<<vi<<endl;
+            step<<dt<<endl;
+            step.close();
+         }
+      }
+
+      if (Mpi::Root()) { cout<<endl<<endl; }
+   }
+   os.close();
+
+
+
+
+
+
+
+
+
+
 
    return 0;
 }
